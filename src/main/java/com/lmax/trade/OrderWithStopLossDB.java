@@ -2,6 +2,7 @@ package com.lmax.trade;
 
 import com.lmax.api.*;
 import com.lmax.api.account.LoginCallback;
+import com.lmax.api.account.LoginRequest;
 import com.lmax.api.order.*;
 import com.lmax.api.orderbook.OrderBookEvent;
 import com.lmax.api.orderbook.OrderBookEventListener;
@@ -9,6 +10,15 @@ import com.lmax.api.orderbook.OrderBookSubscriptionRequest;
 import com.lmax.api.profile.Timer;
 import com.lmax.api.reject.InstructionRejectedEvent;
 import com.lmax.api.reject.InstructionRejectedEventListener;
+import com.lmax.trade.model.OrderDirection;
+import com.lmax.trade.model.OrderExecution;
+import com.lmax.trade.model.OrderRequest;
+import com.lmax.trade.model.OrderRequestStatus;
+import com.lmax.trade.model.query.OrderRequestQuery;
+import com.lmax.trade.repository.OrderExecutionRepository;
+import com.lmax.trade.repository.OrderRequestRepository;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.log4j.xml.DOMConfigurator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,6 +26,7 @@ import org.slf4j.LoggerFactory;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 import java.util.TimerTask;
 import java.util.concurrent.ConcurrentHashMap;
@@ -28,9 +39,9 @@ import java.util.concurrent.locks.ReentrantLock;
  * @author qiancheng.xq
  * @version $Id: OrderWithStopLoss.java, v 0.1 2/13/16 4:54 PM qiancheng.xq Exp $
  */
-public class OrderWithStopLoss implements LoginCallback, OrderBookEventListener,
-                                          OrderEventListener, ExecutionEventListener,
-                                          InstructionRejectedEventListener {
+public class OrderWithStopLossDB implements LoginCallback, OrderBookEventListener,
+                                            OrderEventListener, ExecutionEventListener,
+                                            InstructionRejectedEventListener {
 
     private static final Logger LOGGER = LoggerFactory
             .getLogger(OrderWithStopLoss.class);
@@ -43,6 +54,12 @@ public class OrderWithStopLoss implements LoginCallback, OrderBookEventListener,
 
     private Session session;
 
+    private OrderRequestRepository orderRequestRepository = new OrderRequestRepository();
+
+    private OrderExecutionRepository orderExecutionRepository = new OrderExecutionRepository();
+
+    private Map<String, Integer> instructionId2OrderRequestId = new ConcurrentHashMap<String, Integer>();
+
     private Map<String, PlacedLimitOrder> placedOrder = new ConcurrentHashMap<String, PlacedLimitOrder>();
 
     private final long instrumentId = 4001;
@@ -53,7 +70,7 @@ public class OrderWithStopLoss implements LoginCallback, OrderBookEventListener,
 
     @Override
     public void onLoginSuccess(Session session) {
-        LOGGER.debug("Log in successfully. AccountId is: {}", session.getAccountDetails()
+        LOGGER.info("Log in successfully. AccountId is: {}", session.getAccountDetails()
                 .getAccountId());
 
         this.session = session;
@@ -69,7 +86,7 @@ public class OrderWithStopLoss implements LoginCallback, OrderBookEventListener,
         this.session.subscribe(new OrderBookSubscriptionRequest(instrumentId), new Callback() {
             @Override
             public void onSuccess() {
-                LOGGER.debug("Subscribe order book event successfully.");
+                LOGGER.info("Subscribe order book event successfully.");
             }
 
             @Override
@@ -82,7 +99,7 @@ public class OrderWithStopLoss implements LoginCallback, OrderBookEventListener,
         this.session.subscribe(new OrderSubscriptionRequest(), new Callback() {
             @Override
             public void onSuccess() {
-                LOGGER.debug("Subscribe order event successfully.");
+                LOGGER.info("Subscribe order event successfully.");
             }
 
             @Override
@@ -95,7 +112,7 @@ public class OrderWithStopLoss implements LoginCallback, OrderBookEventListener,
         this.session.subscribe(new ExecutionSubscriptionRequest(), new Callback() {
             @Override
             public void onSuccess() {
-                LOGGER.debug("Subscribe order execution event successfully.");
+                LOGGER.info("Subscribe order execution event successfully.");
             }
 
             @Override
@@ -138,29 +155,34 @@ public class OrderWithStopLoss implements LoginCallback, OrderBookEventListener,
                         "Order(instructionId={},limitPrice={},quantity={},filledQuantity={},canceledQuantity={}) is executing by Broker",
                         order.getInstructionId(), order.getLimitPrice(), order.getQuantity(),
                         order.getFilledQuantity(), order.getCancelledQuantity());
+        updateOrderRequest(order.getInstructionId(), FixedPointNumber.ZERO, FixedPointNumber.ZERO, OrderRequestStatus.ACCEPT, null);
     }
 
     @Override
     public void notify(Execution execution) {
-        synchronized (placedOrder) {
+        synchronized (this) {
             Order order = execution.getOrder();
             PlacedLimitOrder placedLimitOrder = placedOrder.get(order.getInstructionId());
+
+            OrderExecution orderExecution = genOrderExecution(execution);
+            orderExecutionRepository.create(orderExecution);
+
             if (placedLimitOrder != null) {
                 placedLimitOrder.setFilledQuantity(FixedPointNumber.valueOf(placedLimitOrder
                                                                                     .getFilledQuantity().longValue() + execution.getQuantity().longValue()));
                 placedLimitOrder
                         .setPendingQuantity(FixedPointNumber.valueOf(placedLimitOrder
                                                                              .getPendingQuantity().longValue()
-                                                                     - placedLimitOrder.getQuantity()
+                                                                     - execution.getQuantity()
                                 .longValue()));
-
+                placedLimitOrder.setCanceledQuantity(FixedPointNumber.valueOf(placedLimitOrder.getCanceledQuantity().longValue() + execution.getCancelledQuantity().longValue()));
                 LOGGER
                         .info(
                                 "Order(instructionId={},limitPrice={},stopLossOffset={},stopProfitOffset={},placedTime={}) is filled by Broker(price={},quantity={})",
                                 execution.getOrder().getInstructionId(), placedLimitOrder.getLimitPrice(),
                                 placedLimitOrder.getStopLossPriceOffset(),
                                 placedLimitOrder.getStopProfitPriceOffset(),
-                                DateUtils.formate(placedLimitOrder.getPlacedTime()), execution.getPrice(),
+                                DateUtils.format(placedLimitOrder.getPlacedTime()), execution.getPrice(),
                                 execution.getQuantity());
 
                 if (placedLimitOrder.isComplete()) {
@@ -171,8 +193,12 @@ public class OrderWithStopLoss implements LoginCallback, OrderBookEventListener,
                                     placedLimitOrder.getLimitPrice(),
                                     placedLimitOrder.getStopLossPriceOffset(),
                                     placedLimitOrder.getStopProfitPriceOffset(),
-                                    DateUtils.formate(placedLimitOrder.getPlacedTime()));
+                                    DateUtils.format(placedLimitOrder.getPlacedTime()));
                     placedOrder.remove(order.getInstructionId());
+                    instructionId2OrderRequestId.remove(order.getInstructionId());
+                    updateOrderRequest(order.getInstructionId(), placedLimitOrder.getFilledQuantity(), placedLimitOrder.getCanceledQuantity(), OrderRequestStatus.FILLED, null);
+                } else {
+                    updateOrderRequest(order.getInstructionId(), placedLimitOrder.getFilledQuantity(), placedLimitOrder.getCanceledQuantity(), OrderRequestStatus.PARTIAL_FILLED, null);
                 }
                 return;
             }
@@ -182,18 +208,50 @@ public class OrderWithStopLoss implements LoginCallback, OrderBookEventListener,
                 execution.getOrder().getInstructionId(), execution.getPrice(), execution.getQuantity());
     }
 
+
     @Override
     public void notify(InstructionRejectedEvent instructionRejected) {
         LOGGER.error("InstructionRejected. instructionId={}, reason={}.",
                 instructionRejected.getInstructionId(), instructionRejected.getReason());
         placedOrder.remove(instructionRejected.getInstructionId());
+        updateOrderRequest(instructionRejected.getInstructionId(), FixedPointNumber.ZERO, FixedPointNumber.ZERO, OrderRequestStatus.REJECT, instructionRejected.getReason());
+    }
+
+    private OrderExecution genOrderExecution(Execution execution) {
+        OrderExecution orderExecution = new OrderExecution();
+        Integer orderRequestId = instructionId2OrderRequestId.get(execution.getOrder().getInstructionId());
+        orderExecution.setOrderRequestId(orderRequestId);
+        orderExecution.setPrice(Double.parseDouble(execution.getPrice().toString()));
+        orderExecution.setFilledQuantity(Integer.parseInt(execution.getQuantity().toString()));
+        orderExecution.setCancelledQuantity(Integer.parseInt(execution.getCancelledQuantity().toString()));
+        orderExecution.setExecutionDate(new Date());
+        return orderExecution;
+    }
+
+    private void updateOrderRequest(String instructionId, FixedPointNumber filledQuantity, FixedPointNumber cancelledQuantity, OrderRequestStatus orderStatus, String errorMsg) {
+        OrderRequestQuery query = new OrderRequestQuery();
+        query.setInstructionId(instructionId);
+        List<OrderRequest> orderRequests = orderRequestRepository.query(query);
+        if (CollectionUtils.isEmpty(orderRequests)) {
+            return;
+        }
+        OrderRequest orderRequest = orderRequests.get(0);
+        orderRequest.setFilledQuantity(Integer.parseInt(filledQuantity.toString()));
+        orderRequest.setCancelledQuantity(Integer.parseInt(cancelledQuantity.toString()));
+        orderRequest.setStatus(orderStatus.name());
+        if (StringUtils.isNotBlank(errorMsg)) {
+            orderRequest.setErrorMsg(errorMsg);
+        }
+        orderRequest.setUpdateTime(new Date());
+        orderRequestRepository.update(orderRequest);
     }
 
     public class PlaceOrderAcceptCallback implements OrderCallback {
 
         @Override
         public void onSuccess(String instructionId) {
-            LOGGER.debug("Order(instructionId={}) has bean accepted by Broker.", instructionId);
+            LOGGER.info("Order(instructionId={}) has bean accepted by Broker.", instructionId);
+            updateOrderRequest(instructionId, FixedPointNumber.ZERO, FixedPointNumber.ZERO, OrderRequestStatus.ACCEPT, null);
         }
 
         @Override
@@ -213,8 +271,8 @@ public class OrderWithStopLoss implements LoginCallback, OrderBookEventListener,
         @Override
         public void run() {
 
-            FixedPointNumber quantity = FixedPointNumber.valueOf(1000000);
-            FixedPointNumber offset = FixedPointNumber.valueOf(100L);
+            FixedPointNumber quantity = FixedPointNumber.valueOf(4000000);
+            FixedPointNumber offset = FixedPointNumber.valueOf(1000L);
 
             long time = System.currentTimeMillis();
             if (!lastBidPrice.equals(FixedPointNumber.ZERO)) {
@@ -225,13 +283,15 @@ public class OrderWithStopLoss implements LoginCallback, OrderBookEventListener,
                 LimitOrderSpecification limitOrderSpecification = new LimitOrderSpecification(
                         instrumentId, instructionId, limitPrice, quantity, TimeInForce.GOOD_FOR_DAY,
                         offset, offset);
-
-                LOGGER.debug("Place buy order. lastAskPrice={}, orderSpecification={}",
-                        lastAskPrice, limitOrderSpecification);
+                //save order request
+                OrderRequest orderRequest = genOrderRequest(instrumentId, instructionId, limitPrice, quantity, TimeInForce.GOOD_FOR_DAY, offset, offset, OrderDirection.BUY, OrderType.LIMIT);
+                int orderRequestId = orderRequestRepository.create(orderRequest);
+                instructionId2OrderRequestId.put(instructionId, orderRequestId);
                 placedOrder.putIfAbsent(instructionId, PlacedLimitOrder.create(instrumentId,
                         quantity, limitPrice, offset, offset, System.currentTimeMillis()));
+                LOGGER.info("Place buy order. lastAskPrice={}, orderSpecification={}",
+                        lastAskPrice, limitOrderSpecification);
                 session.placeLimitOrder(limitOrderSpecification, new PlaceOrderAcceptCallback());
-
             }
 
             if (!lastAskPrice.equals(FixedPointNumber.ZERO)) {
@@ -242,12 +302,31 @@ public class OrderWithStopLoss implements LoginCallback, OrderBookEventListener,
                 LimitOrderSpecification limitOrderSpecification = new LimitOrderSpecification(
                         instrumentId, instructionId, limitPrice, quantity.negate(),
                         TimeInForce.GOOD_FOR_DAY, offset, offset);
-                LOGGER.debug("Place sell order. lastBidPrice={}, orderSpecification={}",
-                        lastBidPrice, limitOrderSpecification);
+                OrderRequest orderRequest = genOrderRequest(instrumentId, instructionId, limitPrice, quantity.negate(), TimeInForce.GOOD_FOR_DAY, offset, offset, OrderDirection.SELL, OrderType.LIMIT);
+                int orderRequestId = orderRequestRepository.create(orderRequest);
+                instructionId2OrderRequestId.put(instructionId, orderRequestId);
                 placedOrder.putIfAbsent(instructionId, PlacedLimitOrder.create(instrumentId,
-                        quantity, limitPrice, offset, offset, System.currentTimeMillis()));
+                        quantity.negate(), limitPrice, offset, offset, System.currentTimeMillis()));
+                LOGGER.info("Place sell order. lastBidPrice={}, orderSpecification={}",
+                        lastBidPrice, limitOrderSpecification);
                 session.placeLimitOrder(limitOrderSpecification, new PlaceOrderAcceptCallback());
             }
+        }
+
+        private OrderRequest genOrderRequest(long instrumentId, String instructionId, FixedPointNumber limitPrice, FixedPointNumber quantity, TimeInForce timeInForce, FixedPointNumber stopLossPriceOffset, FixedPointNumber stopProfitPriceOffset, OrderDirection orderDirection, OrderType orderType) {
+            OrderRequest orderRequest = new OrderRequest();
+            orderRequest.setInstrumentId(String.valueOf(instrumentId));
+            orderRequest.setInstructionId(instructionId);
+            orderRequest.setLimitPrice(Double.parseDouble(limitPrice.toString()));
+            orderRequest.setQuantity(Integer.parseInt(quantity.toString()));
+            orderRequest.setOrderDirection(orderDirection.name());
+            orderRequest.setOrderType(orderType.name());
+            orderRequest.setStopLossOffset(Double.parseDouble(stopLossPriceOffset.toString()));
+            orderRequest.setStopProfitOffset(Double.parseDouble(stopProfitPriceOffset.toString()));
+            orderRequest.setTimeInForce(timeInForce.name());
+            orderRequest.setStatus(OrderRequestStatus.TO_BE_ACCEPT.name());
+            orderRequest.setCreateTime(new Date());
+            return orderRequest;
         }
     }
 
@@ -429,7 +508,7 @@ public class OrderWithStopLoss implements LoginCallback, OrderBookEventListener,
     public static class DateUtils {
         private static final String pattern = "YYYY-MM-DD HH:mm:ss,SSS";
 
-        public static String formate(long time) {
+        public static String format(long time) {
             Date date = new Date(time);
             DateFormat formatter = new SimpleDateFormat(pattern);
             String dateFormatted = formatter.format(date);
@@ -438,25 +517,15 @@ public class OrderWithStopLoss implements LoginCallback, OrderBookEventListener,
     }
 
     public static void main(String[] args) {
-        //        if (args.length != 4) {
-        //            System.out.println("Usage " + OrderWithStopLoss.class.getName()
-        //                               + " <url> <username> <password> [CFD_DEMO|CFD_LIVE]");
-        //            System.exit(-1);
-        //        }
-        //
-        //        String url = args[0];
-        //        String username = args[1];
-        //        String password = args[2];
-        //        LoginRequest.ProductType productType = LoginRequest.ProductType.valueOf(args[3]
-        //            .toUpperCase());
-        //
-        //        LmaxApi lmaxApi = new LmaxApi(url);
-        //
-        //        OrderWithStopLoss orderWithStopLoss = new OrderWithStopLoss();
-        //        lmaxApi.login(new LoginRequest(username, password, productType), orderWithStopLoss);
+        String url = "https://web-order.london-demo.lmax.com";
+        String username = "quinn1019";
+        String password = "cui390112";
+        LoginRequest.ProductType productType = LoginRequest.ProductType.CFD_DEMO;
 
-        FixedPointNumber fixedPointNumber = FixedPointNumber.valueOf(10000);
-        System.out.println(fixedPointNumber.toString());
+        LmaxApi lmaxApi = new LmaxApi(url);
+
+        OrderWithStopLossDB orderWithStopLoss = new OrderWithStopLossDB();
+        lmaxApi.login(new LoginRequest(username, password, productType), orderWithStopLoss);
 
     }
 

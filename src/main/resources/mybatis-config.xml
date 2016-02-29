@@ -5,7 +5,6 @@
 <configuration>
 
     <properties resource="config.properties">
-        <property name="driver" value="F2Fa3!33TYyg"/>
     </properties>
 
     <environments default="development">
@@ -20,6 +19,7 @@
         </environment>
     </environments>
     <mappers>
-        <mapper class="mybatis.test.mapper.OrderMapper"/>
+        <mapper resource='OrderRequestMapper.xml'/>
+        <mapper resource='OrderExecutionMapper.xml'/>
     </mappers>
 </configuration>

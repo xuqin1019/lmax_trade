@@ -1,4 +1,4 @@
-package mybatis.test.util;
+package com.lmax.trade.util;
 
 import org.apache.ibatis.io.Resources;
 import org.apache.ibatis.session.SqlSessionFactory;

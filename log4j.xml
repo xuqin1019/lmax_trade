@@ -24,11 +24,9 @@
         </layout>
     </appender>
 
-    <logger name="com.lmax.api.test" additivity="false">
+    <logger name="com.lmax.trade" additivity="false">
         <level value="DEBUG"/>
         <appender-ref ref="consoleAppender"/>
-        <appender-ref ref="activitiesAppender"/>
-        <appender-ref ref="transactionsAppender"/>
     </logger>
 
 </log4j:configuration>

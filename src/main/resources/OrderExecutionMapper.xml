@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+<mapper namespace="com.lmax.trade.mapper.OrderExecutionMapper">
+    <resultMap id="orderExecution" type="com.lmax.trade.model.OrderExecution">
+        <id column="id" property="id"/>
+        <id column="order_request_id" property="orderRequestId"/>
+        <id column="price" property="price"/>
+        <id column="filled_quantity" property="filledQuantity"/>
+        <id column="cancelled_quantity" property="cancelledQuantity"/>
+        <id column="execution_date" property="executionDate"/>
+
+        <association property="orderRequest" column="order_request_id"
+                     select="selectOrderRequest"/>
+    </resultMap>
+
+    <sql id="order_execution_column">
+        order_execution.id,
+        order_execution.order_request_id,
+        order_execution.price,
+        order_execution.filled_quantity,
+        order_execution.cancelled_quantity,
+        order_execution.execution_date
+    </sql>
+
+    <select id="getAll" resultMap="orderExecution">
+        select
+        <include refid="order_execution_column"/>
+        from
+        order_execution
+    </select>
+
+    <select id="selectOrderRequest"
+            parameterType="java.lang.Integer"
+            resultType="com.lmax.trade.model.OrderRequest">
+         SELECT
+        id,
+        instrument_id,
+        order_id,
+        account_id,
+        instruction_id,
+        original_instruction_id,
+        order_type,
+        order_direction,
+        time_in_force,
+        limit_price,
+        stop_loss_offset,
+        stop_profit_offset,
+        quantity,
+        filled_quantity,
+        cancelled_quantity,
+        status,
+        create_time,
+        update_time
+        FROM
+            order_request
+        WHERE
+            id = #{orderRequestId}
+    </select>
+
+    <select id="query" resultMap="orderExecution">
+        select
+        <include refid="order_execution_column"/>
+        from
+        order_execution where 1=1
+        <if test="id != -1">
+            AND id = #{id}
+        </if>
+
+        <if test="orderRequestId != null">
+            AND order_request_id = #{orderRequestId}
+        </if>
+    </select>
+
+    <insert id="create" parameterType="com.lmax.trade.model.OrderExecution" useGeneratedKeys="true"
+            keyProperty="id"
+            keyColumn="id">
+        INSERT INTO order_execution(order_request_id, price, filled_quantity, cancelled_quantity,
+        execution_date)
+        VALUES
+        (#{orderRequestId}, #{price}, #{filledQuantity}, #{cancelledQuantity}, #{executionDate})
+        <selectKey keyProperty="id" resultType="int" order="AFTER">
+            SELECT LAST_INSERT_ID();
+        </selectKey>
+    </insert>
+
+    <update id="update" parameterType="com.lmax.trade.model.OrderRequest">
+        UPDATE order_execution set order_request_id=#{orderRequestId}, price=#{price}, filled_quantity=#{filledQuantity}, cancelled_quantity=#{cancelledQuantity}, execution_date=#{executionDate}
+        where id=#{id}
+    </update>
+
+    <delete id="delete" parameterType="int">
+        DELETE from order_execution where id=#{id}
+    </delete>
+</mapper>
